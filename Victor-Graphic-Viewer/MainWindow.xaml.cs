@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -54,6 +54,15 @@ namespace Victor_Graphic_Viewer
                 new TriangleRenderer()
                 // Register renderers for new shapes
             });
+        }
+
+        private void ZoomIn_Click(object sender, RoutedEventArgs e) => shapeCanvas.ZoomIn();
+        private void ZoomOut_Click(object sender, RoutedEventArgs e) => shapeCanvas.ZoomOut();
+        private void ZoomReset_Click(object sender, RoutedEventArgs e) => shapeCanvas.ZoomReset();
+
+        private void ShapeCanvas_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            shapeCanvas.Focus();
         }
 
         private void OnShapeSelected(ShapeBase shape)

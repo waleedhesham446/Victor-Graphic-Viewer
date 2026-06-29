@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -20,6 +20,24 @@ namespace Victor_Graphic_Viewer
         private ShapeBase _selected = null;
         private Transform _transform = Transform.Identity;
 
+        private double _zoom = 1.0;
+        private double _panX = 0.0;
+        private double _panY = 0.0;
+        private const double ZoomMin = 0.1;
+        private const double ZoomMax = 20.0;
+        private const double ZoomStep = 1.15;
+
+        private bool _isPanning;
+        private Point _panStart;
+        
+        private static readonly Brush BackgroundBrush = new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x2E));
+
+        public ShapeCanvas()
+        {
+            Focusable = true;
+            Focus();
+        }
+
         public void RegisterRenderers(IEnumerable<IShapeRenderer> renderers)
             => _renderers = new List<IShapeRenderer>(renderers);
 
@@ -27,12 +45,29 @@ namespace Victor_Graphic_Viewer
         {
             _shapes = new List<ShapeBase>(shapes);
             _selected = null;
-            _transform = BuildTransform();
+            _zoom = 1.0;
+            _panX = 0.0;
+            _panY = 0.0;
             InvalidateVisual();
+            Focus();
+        }
+
+        protected override HitTestResult HitTestCore(PointHitTestParameters hitTestParameters)
+        {
+            return new PointHitTestResult(this, hitTestParameters.HitPoint);
         }
 
         protected override void OnMouseDown(MouseButtonEventArgs e)
         {
+            if (e.ChangedButton == MouseButton.Middle ||
+                (e.ChangedButton == MouseButton.Left && Keyboard.Modifiers == ModifierKeys.Alt))
+            {
+                _isPanning = true;
+                _panStart = e.GetPosition(this);
+                CaptureMouse();
+                e.Handled = true;
+                return;
+            }
             base.OnMouseDown(e);
             var clickPoint = e.GetPosition(this);
 
@@ -52,27 +87,102 @@ namespace Victor_Graphic_Viewer
             ShapeSelected?.Invoke(_selected);
         }
 
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!_isPanning) return;
+
+            var pos = e.GetPosition(this);
+            _panX += pos.X - _panStart.X;
+            _panY += pos.Y - _panStart.Y;
+            _panStart = pos;
+            InvalidateVisual();
+        }
+
+        protected override void OnMouseUp(MouseButtonEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (_isPanning)
+            {
+                _isPanning = false;
+                ReleaseMouseCapture();
+            }
+        }
+
+        protected override void OnMouseWheel(MouseWheelEventArgs e)
+        {
+            base.OnMouseWheel(e);
+
+            var mousePos = e.GetPosition(this);
+            double factor = e.Delta > 0 ? ZoomStep : 1.0 / ZoomStep;
+            ZoomAround(mousePos, factor);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+
+            bool ctrl = Keyboard.Modifiers == ModifierKeys.Control;
+            Console.WriteLine($"CTRL: {ctrl}");
+            if (!ctrl) return;
+
+            var center = new Point(ActualWidth / 2, ActualHeight / 2);
+
+            if (e.Key == Key.OemPlus || e.Key == Key.Add)
+            {
+                ZoomAround(center, ZoomStep);
+                e.Handled = true;
+            }
+            else if (e.Key == Key.OemMinus || e.Key == Key.Subtract)
+            {
+                ZoomAround(center, 1.0 / ZoomStep);
+                e.Handled = true;
+            }
+            else if (e.Key == Key.D0 || e.Key == Key.NumPad0)
+            {
+                // Ctrl+0 — reset zoom and pan
+                _zoom = 1.0;
+                _panX = 0.0;
+                _panY = 0.0;
+                InvalidateVisual();
+                e.Handled = true;
+            }
+        }
+
+        public void ZoomIn() => ZoomAround(new Point(ActualWidth / 2, ActualHeight / 2), ZoomStep);
+        public void ZoomOut() => ZoomAround(new Point(ActualWidth / 2, ActualHeight / 2), 1.0 / ZoomStep);
+        public void ZoomReset() { _zoom = 1.0; _panX = 0; _panY = 0; InvalidateVisual(); }
+
+        private void ZoomAround(Point anchor, double factor)
+        {
+            double newZoom = Math.Max(ZoomMin, Math.Min(ZoomMax, _zoom * factor));
+            if (newZoom == _zoom) return;
+
+            // Adjust pan so the point under the cursor stays fixed
+            // anchor = canvas center + panX + shape_offset * zoom
+            // We want anchor to remain fixed after zoom changes
+            _panX = anchor.X - (anchor.X - (ActualWidth / 2 + _panX)) * (newZoom / _zoom) - ActualWidth / 2;
+            _panY = anchor.Y - (anchor.Y - (ActualHeight / 2 + _panY)) * (newZoom / _zoom) - ActualHeight / 2;
+            _zoom = newZoom;
+
+            InvalidateVisual();
+        }
+
         protected override void OnRender(DrawingContext dc)
         {
             base.OnRender(dc);
+
+            // Draw background explicitly — required for HitTestCore to cover the full area
+            dc.DrawRectangle(BackgroundBrush, null, new Rect(0, 0, ActualWidth, ActualHeight));
+
             if (_shapes.Count == 0) return;
 
             _transform = BuildTransform();
-
             foreach (var shape in _shapes)
             {
                 var renderer = _renderers.FirstOrDefault(r => r.CanRender(shape));
                 if (renderer == null) continue;
-
-                // Draw highlight ring around selected shape
-                if (shape == _selected)
-                {
-                    var highlightPen = new Pen(Brushes.Yellow, 2);
-                    // Let the renderer draw normally, then overlay the highlight
-                }
-
                 renderer.Render(shape, dc, _transform);
-
                 if (shape == _selected)
                     DrawHighlight(dc, shape);
             }
@@ -114,23 +224,30 @@ namespace Victor_Graphic_Viewer
         //   3. Centers the scene
         private Transform BuildTransform()
         {
+            if (_shapes.Count == 0) return Transform.Identity;
+
             var bounds = ComputeBounds();
             if (bounds.IsEmpty) return Transform.Identity;
 
+            // Base scale to fit the scene in the window at zoom = 1
             double scaleX = ActualWidth / bounds.Width;
             double scaleY = ActualHeight / bounds.Height;
-            double scale = Math.Min(scaleX, scaleY) * 0.9;   // 10 % padding
+            double baseScale = Math.Min(scaleX, scaleY) * 0.9;
 
             double cx = bounds.X + bounds.Width / 2;
             double cy = bounds.Y + bounds.Height / 2;
 
-            // Step 1: translate scene center to origin
-            // Step 2: flip Y, apply scale
-            // Step 3: move to control center
             var m = new Matrix();
+
+            // 1. Center the scene at origin
             m.Translate(-cx, -cy);
-            m.Scale(scale, -scale);          // negative Y = flip
-            m.Translate(ActualWidth / 2, ActualHeight / 2);
+
+            // 2. Flip Y + apply base scale + user zoom
+            double totalScale = baseScale * _zoom;
+            m.Scale(totalScale, -totalScale);
+
+            // 3. Move to canvas center + apply pan offset
+            m.Translate(ActualWidth / 2 + _panX, ActualHeight / 2 + _panY);
 
             return new MatrixTransform(m);
         }
